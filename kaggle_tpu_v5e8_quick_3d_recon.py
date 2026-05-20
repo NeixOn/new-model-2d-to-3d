@@ -505,7 +505,9 @@ def main():
     prepare_quick_subset()
 
     import torch_xla.distributed.xla_multiprocessing as xmp
-    xmp.spawn(_mp_fn, args=({},), nprocs=8, start_method="fork")
+    # With PJRT-based torch-xla runtimes, passing nprocs=8 is rejected.
+    # nprocs=None lets XLA use all available TPU devices on v5e-8.
+    xmp.spawn(_mp_fn, args=({},), nprocs=None, start_method="fork")
 
 
 if __name__ == "__main__":
