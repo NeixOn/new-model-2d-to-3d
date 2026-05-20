@@ -74,26 +74,49 @@ PyTorch/XLA-версия тоже лежит в репозитории:
 
 ## 4. Параметры для первого запуска
 
-В начале файла можно менять:
+Параметры можно задавать прямо в Kaggle cell перед запуском:
 
 ```python
-MAX_MODELS_PER_CLASS = 160
-EPOCHS = 4
-BATCH_SIZE_PER_CORE = 8
+%env EPOCHS=100
+%env MAX_MODELS_PER_CLASS=600
+%env PER_DEVICE_BATCH=4
+%env LR=2e-4
+%run kaggle_tpu_v5e8_jax_quick_3d_recon.py
+```
+
+Или для более долгого запуска:
+
+```python
+%env EPOCHS=150
+%env MAX_MODELS_PER_CLASS=1200
+%env PER_DEVICE_BATCH=4
+%env LR=2e-4
+%run kaggle_tpu_v5e8_jax_quick_3d_recon.py
+```
+
+Значения по умолчанию внутри файла:
+
+```python
+MAX_MODELS_PER_CLASS = 600
+EPOCHS = 25
+PER_DEVICE_BATCH = 4
+LR = 2e-4
 ```
 
 Для самого первого теста:
 
 ```python
-MAX_MODELS_PER_CLASS = 80
-EPOCHS = 2
+%env MAX_MODELS_PER_CLASS=80
+%env EPOCHS=2
+%run kaggle_tpu_v5e8_jax_quick_3d_recon.py
 ```
 
 Когда убедишься, что всё работает:
 
 ```python
-MAX_MODELS_PER_CLASS = 500
-EPOCHS = 15
+%env MAX_MODELS_PER_CLASS=1200
+%env EPOCHS=100
+%run kaggle_tpu_v5e8_jax_quick_3d_recon.py
 ```
 
 И можно добавить классы:

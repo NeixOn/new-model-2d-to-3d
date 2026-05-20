@@ -10,6 +10,7 @@ Run:
 """
 
 import math
+import os
 import random
 import tarfile
 from pathlib import Path
@@ -41,14 +42,14 @@ CLASSES = {
     # "car": "02958343",
 }
 
-MAX_MODELS_PER_CLASS = 600
+MAX_MODELS_PER_CLASS = int(os.environ.get("MAX_MODELS_PER_CLASS", "600"))
 VIEWS_PER_MODEL = 1
 IMAGE_SIZE = 128
 VOXEL_SIZE = 32
 
-EPOCHS = 25
-PER_DEVICE_BATCH = 4
-LR = 2e-4
+EPOCHS = int(os.environ.get("EPOCHS", "25"))
+PER_DEVICE_BATCH = int(os.environ.get("PER_DEVICE_BATCH", "4"))
+LR = float(os.environ.get("LR", "2e-4"))
 WEIGHT_DECAY = 1e-4
 THRESHOLD = 0.4
 
