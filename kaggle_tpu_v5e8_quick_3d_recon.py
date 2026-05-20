@@ -41,13 +41,35 @@ os.environ.setdefault("PJRT_DEVICE", "TPU")
 
 SEED = 42
 
-KAGGLE_DATASET_DIR = Path("/kaggle/input/shapenet-3dr2n2")
 WORK_DIR = Path("/kaggle/working")
 DATA_DIR = WORK_DIR / "shapenet_r2n2_quick"
 RESULTS_DIR = WORK_DIR / "quick_3d_recon_results"
 
-RENDER_TGZ = KAGGLE_DATASET_DIR / "ShapeNetRendering.tgz"
-VOX_TGZ = KAGGLE_DATASET_DIR / "ShapeNetVox32.tgz"
+POSSIBLE_DATASET_DIRS = [
+    Path("/kaggle/input/shapenet-3dr2n2"),
+    Path("/kaggle/input/datasets/sirish001/shapenet-3dr2n2"),
+]
+
+
+def find_dataset_archives() -> tuple[Path, Path]:
+    """Find 3D-R2N2 archives in common Kaggle input locations."""
+    for dataset_dir in POSSIBLE_DATASET_DIRS:
+        render_tgz = dataset_dir / "ShapeNetRendering.tgz"
+        vox_tgz = dataset_dir / "ShapeNetVox32.tgz"
+        if render_tgz.exists() and vox_tgz.exists():
+            return render_tgz, vox_tgz
+
+    input_root = Path("/kaggle/input")
+    if input_root.exists():
+        render_matches = list(input_root.rglob("ShapeNetRendering.tgz"))
+        vox_matches = list(input_root.rglob("ShapeNetVox32.tgz"))
+        if render_matches and vox_matches:
+            return render_matches[0], vox_matches[0]
+
+    raise FileNotFoundError(
+        "Cannot find ShapeNetRendering.tgz and ShapeNetVox32.tgz under /kaggle/input. "
+        "In Kaggle, add dataset 'sirish001/shapenet-3dr2n2' to the notebook."
+    )
 
 # ShapeNet synset IDs.
 # Start with one class for a fast proof-of-life run. Add more when everything works.
@@ -106,17 +128,15 @@ def prepare_quick_subset() -> None:
         print(f"Dataset subset already prepared: {DATA_DIR}")
         return
 
-    if not RENDER_TGZ.exists() or not VOX_TGZ.exists():
-        raise FileNotFoundError(
-            "Cannot find 3D-R2N2 archives. In Kaggle, add dataset "
-            "'sirish001/shapenet-3dr2n2' to the notebook."
-        )
+    render_tgz, vox_tgz = find_dataset_archives()
+    print(f"Using render archive: {render_tgz}")
+    print(f"Using voxel archive:  {vox_tgz}")
 
     category_ids = set(CLASSES.values())
     chosen: dict[str, set[str]] = {cat_id: set() for cat_id in category_ids}
 
     print("Selecting and extracting voxel targets...")
-    with tarfile.open(VOX_TGZ, "r:gz") as tar:
+    with tarfile.open(vox_tgz, "r:gz") as tar:
         for member in tar:
             if not member.isfile() or not member.name.endswith(".binvox"):
                 continue
@@ -138,7 +158,7 @@ def prepare_quick_subset() -> None:
     print("Extracting matching rendered images...")
 
     extracted_views: dict[tuple[str, str], int] = {}
-    with tarfile.open(RENDER_TGZ, "r:gz") as tar:
+    with tarfile.open(render_tgz, "r:gz") as tar:
         for member in tar:
             if not member.isfile() or not member.name.lower().endswith(".png"):
                 continue
