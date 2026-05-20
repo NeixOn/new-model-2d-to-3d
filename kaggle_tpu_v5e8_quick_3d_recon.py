@@ -501,6 +501,12 @@ def _mp_fn(rank, flags):
 
 
 def main():
+    raise RuntimeError(
+        "This PyTorch/XLA script currently fails on Kaggle TPU v5e-8 because "
+        "the runtime reports only one SliceBuilder worker address. For parallel "
+        "TPU training, run: %run kaggle_tpu_v5e8_tf_quick_3d_recon.py"
+    )
+
     seed_everything(SEED)
     prepare_quick_subset()
 

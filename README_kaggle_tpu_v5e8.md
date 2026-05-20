@@ -27,13 +27,21 @@ https://www.kaggle.com/datasets/sirish001/shapenet-3dr2n2
 
 ## 3. Запуск
 
-Для Kaggle TPU v5e-8 сначала используй TensorFlow-версию:
+Для Kaggle TPU v5e-8 сначала используй JAX-версию:
+
+```python
+%run kaggle_tpu_v5e8_jax_quick_3d_recon.py
+```
+
+Она использует `jax.pmap` и запускается параллельно на всех TPU-устройствах, которые видит JAX.
+
+TensorFlow-версия тоже лежит в репозитории:
 
 ```python
 %run kaggle_tpu_v5e8_tf_quick_3d_recon.py
 ```
 
-Она использует `tf.distribute.TPUStrategy` и запускается параллельно на TPU-репликах.
+Но в некоторых Kaggle v5e runtime TensorFlow видит только CPU и падает на `ConfigureDistributedTPU`.
 
 PyTorch/XLA-версия тоже лежит в репозитории:
 
@@ -48,7 +56,7 @@ PyTorch/XLA-версия тоже лежит в репозитории:
 Если файл лежит в `/kaggle/working`, запусти:
 
 ```python
-%run /kaggle/working/new-model-2d-to-3d/kaggle_tpu_v5e8_tf_quick_3d_recon.py
+%run /kaggle/working/new-model-2d-to-3d/kaggle_tpu_v5e8_jax_quick_3d_recon.py
 ```
 
 Скрипт сам:
