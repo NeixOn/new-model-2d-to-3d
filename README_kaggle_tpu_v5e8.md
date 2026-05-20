@@ -1,0 +1,95 @@
+# Быстрый запуск single-image 3D reconstruction на Kaggle TPU v5e-8
+
+## 1. Датасет
+
+В Kaggle Notebook нажми **Add input** и добавь датасет:
+
+https://www.kaggle.com/datasets/sirish001/shapenet-3dr2n2
+
+Внутри должны быть архивы:
+
+- `/kaggle/input/shapenet-3dr2n2/ShapeNetRendering.tgz`
+- `/kaggle/input/shapenet-3dr2n2/ShapeNetVox32.tgz`
+
+Это удобный стартовый вариант, потому что там уже есть:
+
+- RGB-рендеры объектов ShapeNet;
+- готовые voxel-модели `32x32x32`;
+- пары подходят для задачи "одно изображение -> 3D форма".
+
+## 2. Настройки Kaggle
+
+В правой панели ноутбука:
+
+- Accelerator: `TPU v5e-8`
+- Internet: можно `Off`, если датасет уже подключен через Add input
+- Session options: стандартные
+
+## 3. Запуск
+
+Загрузи файл `kaggle_tpu_v5e8_quick_3d_recon.py` в Kaggle Notebook или создай cell с содержимым файла.
+
+Если файл лежит в `/kaggle/working`, запусти:
+
+```python
+%run /kaggle/working/kaggle_tpu_v5e8_quick_3d_recon.py
+```
+
+Скрипт сам:
+
+- распакует маленький subset из архивов;
+- обучит модель `ResNet18 encoder -> 3D voxel decoder`;
+- посчитает validation IoU;
+- сохранит веса и preview-картинки.
+
+Результаты будут здесь:
+
+```text
+/kaggle/working/quick_3d_recon_results/
+```
+
+## 4. Параметры для первого запуска
+
+В начале файла можно менять:
+
+```python
+MAX_MODELS_PER_CLASS = 160
+EPOCHS = 4
+BATCH_SIZE_PER_CORE = 8
+```
+
+Для самого первого теста:
+
+```python
+MAX_MODELS_PER_CLASS = 80
+EPOCHS = 2
+```
+
+Когда убедишься, что всё работает:
+
+```python
+MAX_MODELS_PER_CLASS = 500
+EPOCHS = 15
+```
+
+И можно добавить классы:
+
+```python
+CLASSES = {
+    "chair": "03001627",
+    "airplane": "02691156",
+    "car": "02958343",
+}
+```
+
+## 5. Что смотреть после запуска
+
+Главные файлы:
+
+```text
+/kaggle/working/quick_3d_recon_results/best_model.pt
+/kaggle/working/quick_3d_recon_results/previews/sample_0_pred.png
+/kaggle/working/quick_3d_recon_results/previews/sample_0_gt.png
+```
+
+`pred.png` и `gt.png` показывают три проекции voxel-сетки. Для диплома потом лучше добавить нормальный 3D-рендер через marching cubes, но для первого smoke test этих preview достаточно.
