@@ -79,6 +79,7 @@ PyTorch/XLA-версия тоже лежит в репозитории:
 ```python
 %env EPOCHS=100
 %env MAX_MODELS_PER_CLASS=600
+%env VIEWS_PER_MODEL=1
 %env PER_DEVICE_BATCH=4
 %env LR=2e-4
 %run kaggle_tpu_v5e8_jax_quick_3d_recon.py
@@ -89,6 +90,7 @@ PyTorch/XLA-версия тоже лежит в репозитории:
 ```python
 %env EPOCHS=150
 %env MAX_MODELS_PER_CLASS=1200
+%env VIEWS_PER_MODEL=4
 %env PER_DEVICE_BATCH=4
 %env LR=2e-4
 %run kaggle_tpu_v5e8_jax_quick_3d_recon.py
@@ -98,6 +100,7 @@ PyTorch/XLA-версия тоже лежит в репозитории:
 
 ```python
 MAX_MODELS_PER_CLASS = 600
+VIEWS_PER_MODEL = 1
 EPOCHS = 25
 PER_DEVICE_BATCH = 4
 LR = 2e-4
@@ -107,6 +110,7 @@ LR = 2e-4
 
 ```python
 %env MAX_MODELS_PER_CLASS=80
+%env VIEWS_PER_MODEL=1
 %env EPOCHS=2
 %run kaggle_tpu_v5e8_jax_quick_3d_recon.py
 ```
@@ -115,7 +119,22 @@ LR = 2e-4
 
 ```python
 %env MAX_MODELS_PER_CLASS=1200
+%env VIEWS_PER_MODEL=4
 %env EPOCHS=100
+%run kaggle_tpu_v5e8_jax_quick_3d_recon.py
+```
+
+Для максимального прогона текущей архитектуры:
+
+```python
+%env EPOCHS=180
+%env MAX_MODELS_PER_CLASS=6778
+%env VIEWS_PER_MODEL=4
+%env PER_DEVICE_BATCH=4
+%env LR=2e-4
+%env MIN_LR=2e-5
+%env POS_WEIGHT=4.0
+%env PATIENCE=35
 %run kaggle_tpu_v5e8_jax_quick_3d_recon.py
 ```
 

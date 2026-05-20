@@ -43,15 +43,22 @@ CLASSES = {
 }
 
 MAX_MODELS_PER_CLASS = int(os.environ.get("MAX_MODELS_PER_CLASS", "600"))
-VIEWS_PER_MODEL = 1
+VIEWS_PER_MODEL = int(os.environ.get("VIEWS_PER_MODEL", "1"))
 IMAGE_SIZE = 128
 VOXEL_SIZE = 32
 
 EPOCHS = int(os.environ.get("EPOCHS", "25"))
 PER_DEVICE_BATCH = int(os.environ.get("PER_DEVICE_BATCH", "4"))
 LR = float(os.environ.get("LR", "2e-4"))
-WEIGHT_DECAY = 1e-4
-THRESHOLD = 0.4
+MIN_LR = float(os.environ.get("MIN_LR", "2e-5"))
+LR_WARMUP_EPOCHS = int(os.environ.get("LR_WARMUP_EPOCHS", "5"))
+WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-4"))
+THRESHOLD = float(os.environ.get("THRESHOLD", "0.4"))
+POS_WEIGHT = float(os.environ.get("POS_WEIGHT", "4.0"))
+BCE_WEIGHT = float(os.environ.get("BCE_WEIGHT", "1.0"))
+DICE_WEIGHT = float(os.environ.get("DICE_WEIGHT", "1.0"))
+PATIENCE = int(os.environ.get("PATIENCE", "35"))
+MIN_DELTA = float(os.environ.get("MIN_DELTA", "1e-4"))
 
 
 def seed_everything(seed: int) -> None:
@@ -98,7 +105,7 @@ def prepare_quick_subset() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    done_file = DATA_DIR / f".prepared_{MAX_MODELS_PER_CLASS}_{'_'.join(CLASSES.values())}"
+    done_file = DATA_DIR / f".prepared_m{MAX_MODELS_PER_CLASS}_v{VIEWS_PER_MODEL}_{'_'.join(CLASSES.values())}"
     old_done_files = [
         path for path in DATA_DIR.glob(f".prepared_*_{'_'.join(CLASSES.values())}")
         if path != done_file
@@ -217,6 +224,43 @@ def discover_samples(root: Path):
     return samples
 
 
+def split_samples_by_model(samples, val_fraction: float, global_batch: int):
+    by_model = {}
+    for image_path, voxel_path in samples:
+        by_model.setdefault(str(voxel_path), []).append((image_path, voxel_path))
+
+    model_keys = list(by_model.keys())
+    random.shuffle(model_keys)
+
+    val_model_count = max(1, int(len(model_keys) * val_fraction))
+    val_keys = set(model_keys[:val_model_count])
+
+    train_samples = []
+    val_samples = []
+    for key in model_keys:
+        if key in val_keys:
+            val_samples.extend(by_model[key])
+        else:
+            train_samples.extend(by_model[key])
+
+    min_val = global_batch
+    if len(val_samples) < min_val and len(model_keys) > 1:
+        needed = min_val - len(val_samples)
+        moved = []
+        for key in model_keys[val_model_count:]:
+            moved.append(key)
+            needed -= len(by_model[key])
+            if needed <= 0:
+                break
+        for key in moved:
+            train_samples = [sample for sample in train_samples if str(sample[1]) != key]
+            val_samples.extend(by_model[key])
+
+    random.shuffle(train_samples)
+    random.shuffle(val_samples)
+    return train_samples, val_samples
+
+
 def load_sample(image_path: Path, voxel_path: Path):
     image = Image.open(image_path).convert("RGB")
     image = image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
@@ -308,7 +352,9 @@ def forward(params, x):
 
 def loss_and_iou(params, images, voxels):
     logits = forward(params, images)
-    bce = jnp.mean(jnp.maximum(logits, 0) - logits * voxels + jnp.log1p(jnp.exp(-jnp.abs(logits))))
+    bce_per_voxel = jnp.maximum(logits, 0) - logits * voxels + jnp.log1p(jnp.exp(-jnp.abs(logits)))
+    voxel_weights = 1.0 + (POS_WEIGHT - 1.0) * voxels
+    bce = jnp.sum(bce_per_voxel * voxel_weights) / jnp.sum(voxel_weights)
 
     probs = jax.nn.sigmoid(logits)
     axes = tuple(range(1, probs.ndim))
@@ -321,7 +367,7 @@ def loss_and_iou(params, images, voxels):
     inter = jnp.sum(pred * target, axis=axes)
     union = jnp.sum(((pred + target) > 0).astype(jnp.float32), axis=axes)
     iou = jnp.mean((inter + 1e-6) / (union + 1e-6))
-    return bce + dice, iou
+    return BCE_WEIGHT * bce + DICE_WEIGHT * dice, iou
 
 
 def init_adam_state(params):
@@ -329,7 +375,7 @@ def init_adam_state(params):
     return {"step": jnp.array(0, dtype=jnp.int32), "m": zeros, "v": zeros}
 
 
-def adamw_update(params, grads, state, lr=LR, beta1=0.9, beta2=0.999, eps=1e-8):
+def adamw_update(params, grads, state, lr, beta1=0.9, beta2=0.999, eps=1e-8):
     step = state["step"] + 1
     m = tree_map(lambda m, g: beta1 * m + (1.0 - beta1) * g, state["m"], grads)
     v = tree_map(lambda v, g: beta2 * v + (1.0 - beta2) * (g * g), state["v"], grads)
@@ -342,12 +388,12 @@ def adamw_update(params, grads, state, lr=LR, beta1=0.9, beta2=0.999, eps=1e-8):
     return params, {"step": step, "m": m, "v": v}
 
 
-def train_step(params, opt_state, images, voxels):
+def train_step(params, opt_state, images, voxels, lr):
     (loss, iou), grads = jax.value_and_grad(loss_and_iou, has_aux=True)(params, images, voxels)
     grads = lax.pmean(grads, axis_name="devices")
     loss = lax.pmean(loss, axis_name="devices")
     iou = lax.pmean(iou, axis_name="devices")
-    params, opt_state = adamw_update(params, grads, opt_state)
+    params, opt_state = adamw_update(params, grads, opt_state, lr)
     return params, opt_state, loss, iou
 
 
@@ -360,6 +406,14 @@ def eval_step(params, images, voxels):
 
 p_train_step = jax.pmap(train_step, axis_name="devices")
 p_eval_step = jax.pmap(eval_step, axis_name="devices")
+
+
+def epoch_lr(epoch: int) -> float:
+    if LR_WARMUP_EPOCHS > 0 and epoch <= LR_WARMUP_EPOCHS:
+        return LR * epoch / LR_WARMUP_EPOCHS
+    progress = (epoch - LR_WARMUP_EPOCHS) / max(EPOCHS - LR_WARMUP_EPOCHS, 1)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0)))
+    return MIN_LR + (LR - MIN_LR) * cosine
 
 
 def unreplicate(x):
@@ -416,16 +470,18 @@ def main():
     global_batch = PER_DEVICE_BATCH * n_devices
 
     samples = discover_samples(DATA_DIR)
-    val_size = max(global_batch, int(0.15 * len(samples)))
-    val_size = min((val_size // global_batch) * global_batch, len(samples) - global_batch)
-    train_samples = samples[:-val_size]
-    val_samples = samples[-val_size:]
+    train_samples, val_samples = split_samples_by_model(samples, val_fraction=0.15, global_batch=global_batch)
 
     train_steps = len(train_samples) // global_batch
     val_steps = len(val_samples) // global_batch
     print(f"Samples: total={len(samples)}, train={len(train_samples)}, val={len(val_samples)}")
     print(f"Global batch size: {global_batch} ({PER_DEVICE_BATCH} x {n_devices})")
     print(f"Steps: train={train_steps}, val={val_steps}")
+    print(
+        "Config: "
+        f"epochs={EPOCHS}, views_per_model={VIEWS_PER_MODEL}, lr={LR}, min_lr={MIN_LR}, "
+        f"pos_weight={POS_WEIGHT}, threshold={THRESHOLD}, patience={PATIENCE}"
+    )
 
     params = init_params(SEED)
     opt_state = init_adam_state(params)
@@ -434,12 +490,19 @@ def main():
 
     best_iou = -1.0
     best_params = params
+    best_epoch = 0
+    epochs_without_improvement = 0
+    history = []
 
     for epoch in range(1, EPOCHS + 1):
+        lr_value = epoch_lr(epoch)
         train_losses, train_ious = [], []
         for batch in batch_loader(train_samples, global_batch, shuffle=True):
             images, voxels = shard_batch(batch, n_devices)
-            params_repl, opt_state_repl, loss, iou = p_train_step(params_repl, opt_state_repl, images, voxels)
+            lr_sharded = np.full((n_devices,), lr_value, dtype=np.float32)
+            params_repl, opt_state_repl, loss, iou = p_train_step(
+                params_repl, opt_state_repl, images, voxels, lr_sharded
+            )
             train_losses.append(float(np.asarray(loss[0])))
             train_ious.append(float(np.asarray(iou[0])))
 
@@ -454,22 +517,41 @@ def main():
         train_iou = float(np.mean(train_ious))
         val_loss = float(np.mean(val_losses))
         val_iou = float(np.mean(val_ious))
+        history.append((epoch, lr_value, train_loss, train_iou, val_loss, val_iou))
 
         print(
             f"Epoch {epoch:02d}/{EPOCHS} | "
+            f"lr={lr_value:.2e} | "
             f"train_loss={train_loss:.4f} train_iou={train_iou:.4f} | "
             f"val_loss={val_loss:.4f} val_iou={val_iou:.4f}"
         )
 
-        if val_iou > best_iou:
+        if val_iou > best_iou + MIN_DELTA:
             best_iou = val_iou
+            best_epoch = epoch
+            epochs_without_improvement = 0
             best_params = unreplicate(params_repl)
             leaves = jax.tree_util.tree_leaves(best_params)
             np.savez(RESULTS_DIR / "best_model_params.npz", **{f"arr_{i}": np.asarray(x) for i, x in enumerate(leaves)})
+        else:
+            epochs_without_improvement += 1
+
+        if PATIENCE > 0 and epochs_without_improvement >= PATIENCE:
+            print(
+                f"Early stopping: val_iou did not improve for {PATIENCE} epochs. "
+                f"Best epoch={best_epoch}, best_val_iou={best_iou:.4f}"
+            )
+            break
 
     save_predictions(best_params, val_samples)
+    history_path = RESULTS_DIR / "training_history.csv"
+    with open(history_path, "w", encoding="utf-8") as f:
+        f.write("epoch,lr,train_loss,train_iou,val_loss,val_iou\n")
+        for row in history:
+            f.write(",".join(str(x) for x in row) + "\n")
     print(f"Done. Results saved to: {RESULTS_DIR}")
-    print(f"Best validation IoU: {best_iou:.4f}")
+    print(f"Best validation IoU: {best_iou:.4f} at epoch {best_epoch}")
+    print(f"Training history: {history_path}")
 
 
 if __name__ == "__main__":
