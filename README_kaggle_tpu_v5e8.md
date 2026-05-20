@@ -140,3 +140,32 @@ CLASSES = {
 ```
 
 `pred.png` и `gt.png` показывают три проекции voxel-сетки. Для диплома потом лучше добавить нормальный 3D-рендер через marching cubes, но для первого smoke test этих preview достаточно.
+
+## 6. Проверка на одном изображении
+
+После обучения можно подать путь к своему изображению:
+
+```python
+%cd /kaggle/working/new-model-2d-to-3d
+%run kaggle_jax_infer_image_to_3d.py --image /kaggle/path/to/image.png
+```
+
+Результаты сохраняются сюда:
+
+```text
+/kaggle/working/single_image_reconstruction/
+```
+
+Главные файлы:
+
+```text
+prediction.obj
+prediction_preview.png
+prediction_voxels.npy
+```
+
+Если модель выдала слишком пустую форму, можно снизить threshold:
+
+```python
+%run kaggle_jax_infer_image_to_3d.py --image /kaggle/path/to/image.png --threshold 0.25
+```
