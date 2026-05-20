@@ -41,12 +41,12 @@ CLASSES = {
     # "car": "02958343",
 }
 
-MAX_MODELS_PER_CLASS = 160
+MAX_MODELS_PER_CLASS = 600
 VIEWS_PER_MODEL = 1
 IMAGE_SIZE = 128
 VOXEL_SIZE = 32
 
-EPOCHS = 4
+EPOCHS = 25
 PER_DEVICE_BATCH = 4
 LR = 2e-4
 WEIGHT_DECAY = 1e-4
@@ -98,6 +98,13 @@ def prepare_quick_subset() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     done_file = DATA_DIR / f".prepared_{MAX_MODELS_PER_CLASS}_{'_'.join(CLASSES.values())}"
+    old_done_files = [
+        path for path in DATA_DIR.glob(f".prepared_*_{'_'.join(CLASSES.values())}")
+        if path != done_file
+    ]
+    for path in old_done_files:
+        path.unlink()
+
     if done_file.exists():
         print(f"Dataset subset already prepared: {DATA_DIR}")
         return
