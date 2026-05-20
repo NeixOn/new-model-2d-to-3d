@@ -27,12 +27,28 @@ https://www.kaggle.com/datasets/sirish001/shapenet-3dr2n2
 
 ## 3. Запуск
 
-Загрузи файл `kaggle_tpu_v5e8_quick_3d_recon.py` в Kaggle Notebook или создай cell с содержимым файла.
+Для Kaggle TPU v5e-8 сначала используй TensorFlow-версию:
+
+```python
+%run kaggle_tpu_v5e8_tf_quick_3d_recon.py
+```
+
+Она использует `tf.distribute.TPUStrategy` и запускается параллельно на TPU-репликах.
+
+PyTorch/XLA-версия тоже лежит в репозитории:
+
+```python
+%run kaggle_tpu_v5e8_quick_3d_recon.py
+```
+
+Но на текущем Kaggle v5e runtime она может падать на multi-process PJRT initialization с ошибкой `Expected 8 worker addresses, got 1`.
+
+Загрузи файл в Kaggle Notebook или создай cell с содержимым файла.
 
 Если файл лежит в `/kaggle/working`, запусти:
 
 ```python
-%run /kaggle/working/kaggle_tpu_v5e8_quick_3d_recon.py
+%run /kaggle/working/new-model-2d-to-3d/kaggle_tpu_v5e8_tf_quick_3d_recon.py
 ```
 
 Скрипт сам:
