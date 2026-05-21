@@ -51,7 +51,7 @@ RESULTS_DIR = Path(os.environ.get("STAGE1_RESULTS_DIR", "/kaggle/working/shape_v
 FIELD_TYPE = os.environ.get("FIELD_TYPE", "auto").lower()  # auto, sdf, occupancy
 EPOCHS = int(os.environ.get("EPOCHS", "50"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "2"))
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "0"))
 LR = float(os.environ.get("LR", "2e-4"))
 WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-4"))
 KL_WEIGHT = float(os.environ.get("KL_WEIGHT", "1e-4"))
@@ -67,6 +67,8 @@ FLOW_HEADS = int(os.environ.get("FLOW_HEADS", "8"))
 DECODER_HIDDEN = int(os.environ.get("DECODER_HIDDEN", "384"))
 DECODER_LAYERS = int(os.environ.get("DECODER_LAYERS", "5"))
 FOURIER_BANDS = int(os.environ.get("FOURIER_BANDS", "8"))
+FORCE_CPU = os.environ.get("FORCE_CPU", "0") == "1"
+SANITY_ONLY = os.environ.get("SANITY_ONLY", "0") == "1"
 
 MAX_MODELS_PER_CLASS = int(os.environ.get("MAX_MODELS_PER_CLASS", "1200"))
 SHAPENET_CLASSES = [
@@ -88,6 +90,8 @@ def seed_everything(seed: int) -> None:
 
 
 def choose_device() -> torch.device:
+    if FORCE_CPU:
+        return torch.device("cpu")
     try:
         import torch_xla.core.xla_model as xm
 
@@ -438,18 +442,28 @@ def run_epoch(model: ShapeVAE, loader: DataLoader, optimizer, device: torch.devi
     counts = {"recon": 0, "bce": 0, "iou": 0}
     steps = 0
 
-    for batch in loader:
+    for step, batch in enumerate(loader, start=1):
+        if step == 1:
+            print(f"{'Train' if train else 'Val'}: first batch loaded, moving to {device}...", flush=True)
         batch = {k: v.to(device) for k, v in batch.items()}
+        if step == 1:
+            print(f"{'Train' if train else 'Val'}: first batch on device, running forward...", flush=True)
 
         with torch.set_grad_enabled(train):
             outputs = model(batch["shape_points"], batch["query_points"])
+            if step == 1:
+                print(f"{'Train' if train else 'Val'}: forward done, computing loss...", flush=True)
             loss, metrics = compute_loss(outputs, batch)
 
             if train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                if step == 1:
+                    print(f"{'Train' if train else 'Val'}: backward done, optimizer step...", flush=True)
                 optimizer_step(optimizer)
+                if step == 1:
+                    print(f"{'Train' if train else 'Val'}: optimizer step done.", flush=True)
 
         totals["loss"] += float(loss.detach().cpu())
         for key in ("recon", "bce", "iou"):
@@ -505,8 +519,22 @@ def main() -> None:
     print(
         "Config: "
         f"latent_tokens={LATENT_TOKENS}, latent_dim={LATENT_DIM}, heads={FLOW_HEADS}, "
-        f"shape_points={SHAPE_POINTS}, query_points={QUERY_POINTS}, field_type={FIELD_TYPE}"
+        f"shape_points={SHAPE_POINTS}, query_points={QUERY_POINTS}, field_type={FIELD_TYPE}, "
+        f"num_workers={NUM_WORKERS}, force_cpu={FORCE_CPU}"
     )
+
+    print("Loading one sanity batch before training...", flush=True)
+    sanity_batch = next(iter(train_loader))
+    print(
+        "Sanity batch shapes: "
+        f"shape_points={tuple(sanity_batch['shape_points'].shape)}, "
+        f"query_points={tuple(sanity_batch['query_points'].shape)}, "
+        f"target={tuple(sanity_batch['target'].shape)}",
+        flush=True,
+    )
+    if SANITY_ONLY:
+        print("SANITY_ONLY=1, stopping before training loop.", flush=True)
+        return
 
     best_val = float("inf")
     history_path = RESULTS_DIR / "stage1_history.csv"
