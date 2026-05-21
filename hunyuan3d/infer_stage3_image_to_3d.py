@@ -139,7 +139,8 @@ def save_obj_from_occupancy(occupancy: np.ndarray, path: Path, threshold: float)
         from skimage import measure
     except Exception as exc:
         print(f"Cannot import skimage.measure for marching cubes: {exc}")
-        return False
+        print("Falling back to coarse voxel OBJ export.")
+        return save_voxel_obj_from_occupancy(occupancy, path, threshold)
 
     if occupancy.max() < threshold or occupancy.min() > threshold:
         print(
@@ -159,6 +160,64 @@ def save_obj_from_occupancy(occupancy: np.ndarray, path: Path, threshold: float)
             a, b, c = face + 1
             f.write(f"f {a} {b} {c}\n")
     print(f"Saved mesh: {path} ({len(verts)} verts, {len(faces)} faces)")
+    return True
+
+
+def save_voxel_obj_from_occupancy(
+    occupancy: np.ndarray,
+    path: Path,
+    threshold: float,
+    max_voxels: int = 4000,
+) -> bool:
+    filled = np.argwhere(occupancy >= threshold)
+    if filled.size == 0:
+        print(f"Cannot extract voxel OBJ: no cells above threshold={threshold}")
+        return False
+
+    if len(filled) > max_voxels:
+        values = occupancy[filled[:, 0], filled[:, 1], filled[:, 2]]
+        keep = np.argsort(values)[-max_voxels:]
+        filled = filled[keep]
+
+    n = occupancy.shape[0]
+    step = 2.0 / max(n - 1, 1)
+    half = step * 0.48
+
+    cube_offsets = np.array(
+        [
+            [-half, -half, -half],
+            [half, -half, -half],
+            [half, half, -half],
+            [-half, half, -half],
+            [-half, -half, half],
+            [half, -half, half],
+            [half, half, half],
+            [-half, half, half],
+        ],
+        dtype=np.float32,
+    )
+    cube_faces = [
+        (1, 2, 3, 4),
+        (5, 8, 7, 6),
+        (1, 5, 6, 2),
+        (2, 6, 7, 3),
+        (3, 7, 8, 4),
+        (4, 8, 5, 1),
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        vertex_base = 0
+        for cell in filled:
+            center = cell.astype(np.float32) * step - 1.0
+            verts = center[None, :] + cube_offsets
+            for v in verts:
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+            for face in cube_faces:
+                a, b, c, d = [vertex_base + idx for idx in face]
+                f.write(f"f {a} {b} {c} {d}\n")
+            vertex_base += 8
+
+    print(f"Saved coarse voxel mesh: {path} ({len(filled)} cubes)")
     return True
 
 

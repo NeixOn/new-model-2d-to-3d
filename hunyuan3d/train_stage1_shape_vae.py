@@ -56,7 +56,10 @@ LR = float(os.environ.get("LR", "2e-4"))
 WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "1e-4"))
 KL_WEIGHT = float(os.environ.get("KL_WEIGHT", "1e-4"))
 POS_WEIGHT = float(os.environ.get("POS_WEIGHT", "4.0"))
+DICE_WEIGHT = float(os.environ.get("DICE_WEIGHT", "0.5"))
 VAL_FRACTION = float(os.environ.get("VAL_FRACTION", "0.10"))
+RESUME_CKPT = os.environ.get("RESUME_CKPT", "")
+BEST_METRIC = os.environ.get("BEST_METRIC", "iou").lower()  # iou or loss
 
 SHAPE_POINTS = int(os.environ.get("SHAPE_POINTS", "4096"))
 QUERY_POINTS = int(os.environ.get("QUERY_POINTS", "4096"))
@@ -69,6 +72,7 @@ DECODER_LAYERS = int(os.environ.get("DECODER_LAYERS", "5"))
 FOURIER_BANDS = int(os.environ.get("FOURIER_BANDS", "8"))
 FORCE_CPU = os.environ.get("FORCE_CPU", "0") == "1"
 SANITY_ONLY = os.environ.get("SANITY_ONLY", "0") == "1"
+VERBOSE_BATCH = os.environ.get("VERBOSE_BATCH", "1") == "1"
 
 MAX_MODELS_PER_CLASS = int(os.environ.get("MAX_MODELS_PER_CLASS", "1200"))
 SHAPENET_CLASSES = [
@@ -424,34 +428,44 @@ def compute_loss(outputs: dict[str, torch.Tensor], batch: dict[str, torch.Tensor
     logits = -outputs["sdf"]
     weights = 1.0 + (POS_WEIGHT - 1.0) * target
     bce = F.binary_cross_entropy_with_logits(logits, target, weight=weights)
+    probs = torch.sigmoid(logits)
+    inter_soft = (probs * target).sum(dim=(1, 2))
+    union_soft = probs.sum(dim=(1, 2)) + target.sum(dim=(1, 2))
+    dice = 1.0 - ((2.0 * inter_soft + 1e-6) / (union_soft + 1e-6)).mean()
     kl = -0.5 * torch.mean(1 + outputs["logvar"] - outputs["mu"].pow(2) - outputs["logvar"].exp())
-    loss = bce + KL_WEIGHT * kl
+    loss = bce + DICE_WEIGHT * dice + KL_WEIGHT * kl
 
     with torch.no_grad():
-        pred = (torch.sigmoid(logits) > 0.5).float()
+        pred = (probs > 0.5).float()
         inter = (pred * target).sum()
         union = ((pred + target) > 0).float().sum()
         iou = ((inter + 1e-6) / (union + 1e-6)).item()
-    metrics = {"recon": math.nan, "bce": float(bce.detach().cpu()), "iou": iou}
+    metrics = {
+        "recon": math.nan,
+        "bce": float(bce.detach().cpu()),
+        "dice": float(dice.detach().cpu()),
+        "iou": iou,
+    }
     return loss, metrics
 
 
 def run_epoch(model: ShapeVAE, loader: DataLoader, optimizer, device: torch.device, train: bool) -> dict[str, float]:
     model.train(train)
     totals = {"loss": 0.0, "recon": 0.0, "bce": 0.0, "iou": 0.0}
-    counts = {"recon": 0, "bce": 0, "iou": 0}
+    totals["dice"] = 0.0
+    counts = {"recon": 0, "bce": 0, "dice": 0, "iou": 0}
     steps = 0
 
     for step, batch in enumerate(loader, start=1):
-        if step == 1:
+        if VERBOSE_BATCH and step == 1:
             print(f"{'Train' if train else 'Val'}: first batch loaded, moving to {device}...", flush=True)
         batch = {k: v.to(device) for k, v in batch.items()}
-        if step == 1:
+        if VERBOSE_BATCH and step == 1:
             print(f"{'Train' if train else 'Val'}: first batch on device, running forward...", flush=True)
 
         with torch.set_grad_enabled(train):
             outputs = model(batch["shape_points"], batch["query_points"])
-            if step == 1:
+            if VERBOSE_BATCH and step == 1:
                 print(f"{'Train' if train else 'Val'}: forward done, computing loss...", flush=True)
             loss, metrics = compute_loss(outputs, batch)
 
@@ -459,14 +473,14 @@ def run_epoch(model: ShapeVAE, loader: DataLoader, optimizer, device: torch.devi
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                if step == 1:
+                if VERBOSE_BATCH and step == 1:
                     print(f"{'Train' if train else 'Val'}: backward done, optimizer step...", flush=True)
                 optimizer_step(optimizer)
-                if step == 1:
+                if VERBOSE_BATCH and step == 1:
                     print(f"{'Train' if train else 'Val'}: optimizer step done.", flush=True)
 
         totals["loss"] += float(loss.detach().cpu())
-        for key in ("recon", "bce", "iou"):
+        for key in ("recon", "bce", "dice", "iou"):
             value = metrics.get(key, math.nan)
             if not math.isnan(value):
                 totals[key] += value
@@ -474,7 +488,7 @@ def run_epoch(model: ShapeVAE, loader: DataLoader, optimizer, device: torch.devi
         steps += 1
 
     result = {"loss": totals["loss"] / max(steps, 1)}
-    for key in ("recon", "bce", "iou"):
+    for key in ("recon", "bce", "dice", "iou"):
         if counts[key] > 0:
             result[key] = totals[key] / counts[key]
     return result
@@ -510,6 +524,12 @@ def main() -> None:
 
     device = choose_device()
     model = make_model().to(device)
+    if RESUME_CKPT:
+        resume_path = Path(RESUME_CKPT)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"RESUME_CKPT not found: {resume_path}")
+        model.load_state_dict(torch.load(resume_path, map_location="cpu"), strict=True)
+        print(f"Resumed model weights from: {resume_path}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
     print(f"Data root: {DATA_ROOT}")
@@ -520,7 +540,8 @@ def main() -> None:
         "Config: "
         f"latent_tokens={LATENT_TOKENS}, latent_dim={LATENT_DIM}, heads={FLOW_HEADS}, "
         f"shape_points={SHAPE_POINTS}, query_points={QUERY_POINTS}, field_type={FIELD_TYPE}, "
-        f"num_workers={NUM_WORKERS}, force_cpu={FORCE_CPU}"
+        f"num_workers={NUM_WORKERS}, force_cpu={FORCE_CPU}, dice_weight={DICE_WEIGHT}, "
+        f"best_metric={BEST_METRIC}"
     )
 
     print("Loading one sanity batch before training...", flush=True)
@@ -536,9 +557,12 @@ def main() -> None:
         print("SANITY_ONLY=1, stopping before training loop.", flush=True)
         return
 
-    best_val = float("inf")
+    best_score = -float("inf") if BEST_METRIC == "iou" else float("inf")
     history_path = RESULTS_DIR / "stage1_history.csv"
-    history_path.write_text("epoch,train_loss,val_loss,train_bce,val_bce,train_iou,val_iou\n", encoding="utf-8")
+    history_path.write_text(
+        "epoch,train_loss,val_loss,train_bce,val_bce,train_dice,val_dice,train_iou,val_iou\n",
+        encoding="utf-8",
+    )
 
     for epoch in range(1, EPOCHS + 1):
         train_metrics = run_epoch(model, train_loader, optimizer, device, train=True)
@@ -550,6 +574,8 @@ def main() -> None:
             val_metrics.get("loss", math.nan),
             train_metrics.get("bce", math.nan),
             val_metrics.get("bce", math.nan),
+            train_metrics.get("dice", math.nan),
+            val_metrics.get("dice", math.nan),
             train_metrics.get("iou", math.nan),
             val_metrics.get("iou", math.nan),
         ]
@@ -561,17 +587,21 @@ def main() -> None:
             f"train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} | "
             f"train_bce={train_metrics.get('bce', math.nan):.4f} "
             f"val_bce={val_metrics.get('bce', math.nan):.4f} | "
+            f"train_dice={train_metrics.get('dice', math.nan):.4f} "
+            f"val_dice={val_metrics.get('dice', math.nan):.4f} | "
             f"train_iou={train_metrics.get('iou', math.nan):.4f} "
             f"val_iou={val_metrics.get('iou', math.nan):.4f}"
         )
 
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
+        score = val_metrics.get("iou", -float("inf")) if BEST_METRIC == "iou" else val_metrics["loss"]
+        improved = score > best_score if BEST_METRIC == "iou" else score < best_score
+        if improved:
+            best_score = score
             save_checkpoint(model, RESULTS_DIR / "shape_vae_stage1_best.pt")
 
         save_checkpoint(model, RESULTS_DIR / "shape_vae_stage1_last.pt")
 
-    print(f"Done. Best val loss: {best_val:.4f}")
+    print(f"Done. Best val {BEST_METRIC}: {best_score:.4f}")
     print(f"Saved: {RESULTS_DIR / 'shape_vae_stage1_best.pt'}")
 
 
