@@ -55,6 +55,7 @@ SHAPE_ROOT = Path(os.environ.get("STAGE2_SHAPE_ROOT", "/kaggle/working/shapenet_
 RENDER_ROOT = Path(os.environ.get("STAGE2_RENDER_ROOT", "/kaggle/working/shapenet_render_stage2"))
 RESULTS_DIR = Path(os.environ.get("STAGE2_RESULTS_DIR", "/kaggle/working/shape_flow_stage2_results"))
 STAGE1_CKPT = Path(os.environ.get("STAGE1_CKPT", "/kaggle/working/shape_vae_stage1_results/shape_vae_stage1_best.pt"))
+RESUME_FLOW_CKPT = os.environ.get("RESUME_FLOW_CKPT", "")
 
 EPOCHS = int(os.environ.get("EPOCHS", "20"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "4"))
@@ -456,11 +457,19 @@ def main() -> None:
     cfg = make_config()
     vae = load_stage1_vae(cfg, device)
     flow = ImageConditionedShapeFlowDiT(cfg).to(device)
+    if RESUME_FLOW_CKPT:
+        resume_path = Path(RESUME_FLOW_CKPT)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"RESUME_FLOW_CKPT not found: {resume_path}")
+        flow.load_state_dict(torch.load(resume_path, map_location="cpu"), strict=True)
+        print(f"Resumed flow weights from: {resume_path}", flush=True)
     optimizer = torch.optim.AdamW(flow.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
     print(f"Shape root: {SHAPE_ROOT}", flush=True)
     print(f"Render root: {RENDER_ROOT}", flush=True)
     print(f"Stage 1 checkpoint: {STAGE1_CKPT}", flush=True)
+    if RESUME_FLOW_CKPT:
+        print(f"Resume flow checkpoint: {RESUME_FLOW_CKPT}", flush=True)
     print(f"Results: {RESULTS_DIR}", flush=True)
     print(f"Device: {device}", flush=True)
     print(f"Samples: total={len(samples)}, train={len(train_samples)}, val={len(val_samples)}", flush=True)
