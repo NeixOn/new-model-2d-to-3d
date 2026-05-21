@@ -67,6 +67,8 @@ TRIPLANE_RES = int(os.environ.get("TRIPLANE_RES", "32"))
 TRIPLANE_CHANNELS = int(os.environ.get("TRIPLANE_CHANNELS", "16"))
 QUERY_POINTS = int(os.environ.get("QUERY_POINTS", "4096"))
 MLP_HIDDEN = int(os.environ.get("MLP_HIDDEN", "128"))
+DROPOUT = float(os.environ.get("DROPOUT", "0.10"))
+QUERY_POS_BOOST = float(os.environ.get("QUERY_POS_BOOST", "8.0"))
 
 EPOCHS = int(os.environ.get("EPOCHS", "80"))
 PER_DEVICE_BATCH = int(os.environ.get("PER_DEVICE_BATCH", "4"))
@@ -211,7 +213,8 @@ def discover_samples(root: Path):
             images_by_key.setdefault((cat_id, model_id), []).append(path)
 
     samples = []
-    for key, vox_path in vox_by_key.items():
+    selected_items = sorted(vox_by_key.items())[:MAX_MODELS_PER_CLASS]
+    for key, vox_path in selected_items:
         for image_path in sorted(images_by_key.get(key, []))[:VIEWS_PER_MODEL]:
             samples.append((image_path, vox_path))
 
@@ -299,7 +302,14 @@ def sample_query_points(key, voxels, num_points: int):
     batch = voxels.shape[0]
     total = VOXEL_SIZE ** 3
     flat = voxels.reshape(batch, total)
-    idx = jrandom.randint(key, (batch, num_points), 0, total)
+    keys = jrandom.split(key, batch)
+    probs = 1.0 + (QUERY_POS_BOOST - 1.0) * flat
+    probs = probs / jnp.sum(probs, axis=1, keepdims=True)
+
+    def sample_one(k, p):
+        return jrandom.choice(k, total, shape=(num_points,), replace=True, p=p)
+
+    idx = jax.vmap(sample_one)(keys, probs)
     labels = jnp.take_along_axis(flat, idx, axis=1)
     coords = jnp.asarray(FULL_QUERY_GRID)[idx]
     return coords, labels[..., None]
@@ -402,24 +412,39 @@ def positional_encoding(points):
     ], axis=-1)
 
 
-def query_occupancy(params, triplanes, points):
+def apply_dropout(x, rng, rate):
+    if rate <= 0.0:
+        return x
+    keep = 1.0 - rate
+    mask = jrandom.bernoulli(rng, keep, x.shape)
+    return jnp.where(mask, x / keep, 0.0)
+
+
+def query_occupancy(params, triplanes, points, rng=None, training=False):
     xy = bilinear_sample(triplanes[:, 0], points[..., [0, 1]])
     xz = bilinear_sample(triplanes[:, 1], points[..., [0, 2]])
     yz = bilinear_sample(triplanes[:, 2], points[..., [1, 2]])
     feats = jnp.concatenate([xy, xz, yz, positional_encoding(points)], axis=-1)
     x = jax.nn.gelu(dense(feats, params["mlp1"]))
+    if training and DROPOUT > 0.0 and rng is not None:
+        rng, drop_rng = jrandom.split(rng)
+        x = apply_dropout(x, drop_rng, DROPOUT)
     x = jax.nn.gelu(dense(x, params["mlp2"]))
+    if training and DROPOUT > 0.0 and rng is not None:
+        rng, drop_rng = jrandom.split(rng)
+        x = apply_dropout(x, drop_rng, DROPOUT)
     return dense(x, params["mlp3"])
 
 
-def forward(params, images, points):
+def forward(params, images, points, rng=None, training=False):
     triplanes = encode_to_triplanes(params, images)
-    return query_occupancy(params, triplanes, points)
+    return query_occupancy(params, triplanes, points, rng=rng, training=training)
 
 
 def loss_and_iou(params, images, voxels, rng):
-    points, labels = sample_query_points(rng, voxels, QUERY_POINTS)
-    logits = forward(params, images, points)
+    sample_rng, dropout_rng = jrandom.split(rng)
+    points, labels = sample_query_points(sample_rng, voxels, QUERY_POINTS)
+    logits = forward(params, images, points, rng=dropout_rng, training=True)
 
     bce_per_point = jnp.maximum(logits, 0) - logits * labels + jnp.log1p(jnp.exp(-jnp.abs(logits)))
     weights = 1.0 + (POS_WEIGHT - 1.0) * labels
@@ -571,7 +596,7 @@ def main():
         "Config: "
         f"epochs={EPOCHS}, views={VIEWS_PER_MODEL}, query_points={QUERY_POINTS}, "
         f"triplane={TRIPLANE_RES}x{TRIPLANE_RES}x{TRIPLANE_CHANNELS}, lr={LR}, "
-        f"max_val_batches={MAX_VAL_BATCHES}"
+        f"max_val_batches={MAX_VAL_BATCHES}, dropout={DROPOUT}, query_pos_boost={QUERY_POS_BOOST}"
     )
 
     params = init_params(SEED)

@@ -505,6 +505,8 @@ kaggle_jax_triplane_infer_image_to_3d.py
 %env LR=2e-4
 %env MIN_LR=2e-5
 %env POS_WEIGHT=4.0
+%env QUERY_POS_BOOST=8.0
+%env DROPOUT=0.10
 %env PATIENCE=25
 %env MAX_VAL_BATCHES=50
 
@@ -526,6 +528,8 @@ kaggle_jax_triplane_infer_image_to_3d.py
 %env LR=2e-4
 %env MIN_LR=2e-5
 %env POS_WEIGHT=4.0
+%env QUERY_POS_BOOST=8.0
+%env DROPOUT=0.10
 %env PATIENCE=30
 %env MAX_VAL_BATCHES=80
 
@@ -593,8 +597,60 @@ Triplane Occupancy должен стремиться выше, но обучен
 Если новая модель не даст прирост сразу, это не означает, что идея хуже. Она чувствительнее к:
 
 - `QUERY_POINTS`;
+- `QUERY_POS_BOOST`;
+- `DROPOUT`;
 - количеству views;
 - threshold;
 - learning rate;
 - числу validation batches;
 - качеству train/val split.
+
+## Улучшения после первого запуска
+
+После первого прогона `val_full_iou` остановился около `0.4786`. Это выше dense voxel baseline, но прирост небольшой. Причина была в двух вещах:
+
+- uniform query sampling выбирал слишком много пустого пространства;
+- модель быстро переобучалась: train query IoU рос, а validation IoU стоял.
+
+В training script добавлены:
+
+```text
+QUERY_POS_BOOST
+DROPOUT
+строгое ограничение discover_samples по MAX_MODELS_PER_CLASS
+```
+
+`QUERY_POS_BOOST=8.0` чаще выбирает занятые voxel-точки при обучении occupancy MLP. Это должно лучше учить поверхность и внутренний объём объекта.
+
+`DROPOUT=0.10` добавляет регуляризацию в implicit MLP и должен уменьшить переобучение.
+
+Для следующего запуска я бы использовал:
+
+```python
+%env EPOCHS=100
+%env MAX_MODELS_PER_CLASS=6778
+%env VIEWS_PER_MODEL=8
+%env PER_DEVICE_BATCH=4
+%env QUERY_POINTS=8192
+%env TRIPLANE_RES=32
+%env TRIPLANE_CHANNELS=24
+%env MLP_HIDDEN=192
+%env LR=1.5e-4
+%env MIN_LR=2e-5
+%env POS_WEIGHT=3.0
+%env QUERY_POS_BOOST=8.0
+%env DROPOUT=0.10
+%env WEIGHT_DECAY=3e-4
+%env PATIENCE=25
+%env MAX_VAL_BATCHES=80
+
+%run kaggle_jax_triplane_occupancy_train.py
+```
+
+Это тяжелее, но должно быть сильнее:
+
+- больше query points;
+- больше triplane channels;
+- больше hidden size;
+- больше weight decay;
+- чуть меньше learning rate.
