@@ -65,6 +65,9 @@ VAL_FRACTION = float(os.environ.get("VAL_FRACTION", "0.10"))
 SANITY_ONLY = os.environ.get("SANITY_ONLY", "0") == "1"
 FORCE_CPU = os.environ.get("FORCE_CPU", "0") == "1"
 VERBOSE_BATCH = os.environ.get("VERBOSE_BATCH", "1") == "1"
+SKIP_VAL = os.environ.get("SKIP_VAL", "0") == "1"
+MAX_VAL_BATCHES = int(os.environ.get("MAX_VAL_BATCHES", "10"))
+MAX_TRAIN_BATCHES = int(os.environ.get("MAX_TRAIN_BATCHES", "0"))
 
 MAX_MODELS_PER_CLASS = int(os.environ.get("MAX_MODELS_PER_CLASS", "1200"))
 VIEWS_PER_MODEL = int(os.environ.get("VIEWS_PER_MODEL", "4"))
@@ -382,12 +385,15 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
     train: bool,
+    max_batches: int = 0,
 ) -> dict[str, float]:
     flow.train(train)
     total_loss = 0.0
     steps = 0
 
     for step, batch in enumerate(loader, start=1):
+        if max_batches > 0 and step > max_batches:
+            break
         if VERBOSE_BATCH and step == 1:
             print(f"{'Train' if train else 'Val'}: first batch loaded, moving to {device}...", flush=True)
         image = batch["image"].to(device)
@@ -462,7 +468,8 @@ def main() -> None:
         "Config: "
         f"image={IMAGE_SIZE}, image_dim={IMAGE_DIM}, image_depth={IMAGE_DEPTH}, "
         f"latent_tokens={LATENT_TOKENS}, latent_dim={LATENT_DIM}, "
-        f"flow_layers={FLOW_LAYERS}, batch={BATCH_SIZE}, shape_points={SHAPE_POINTS}",
+        f"flow_layers={FLOW_LAYERS}, batch={BATCH_SIZE}, shape_points={SHAPE_POINTS}, "
+        f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, skip_val={SKIP_VAL}",
         flush=True,
     )
 
@@ -483,8 +490,27 @@ def main() -> None:
     best_val = float("inf")
 
     for epoch in range(1, EPOCHS + 1):
-        train_metrics = run_epoch(flow, vae, train_loader, optimizer, device, train=True)
-        val_metrics = run_epoch(flow, vae, val_loader, None, device, train=False)
+        train_metrics = run_epoch(
+            flow,
+            vae,
+            train_loader,
+            optimizer,
+            device,
+            train=True,
+            max_batches=MAX_TRAIN_BATCHES,
+        )
+        if SKIP_VAL:
+            val_metrics = {"loss": float("nan")}
+        else:
+            val_metrics = run_epoch(
+                flow,
+                vae,
+                val_loader,
+                None,
+                device,
+                train=False,
+                max_batches=MAX_VAL_BATCHES,
+            )
 
         with open(history_path, "a", encoding="utf-8") as f:
             f.write(f"{epoch},{train_metrics['loss']},{val_metrics['loss']}\n")
@@ -495,8 +521,9 @@ def main() -> None:
             flush=True,
         )
 
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
+        score = train_metrics["loss"] if SKIP_VAL else val_metrics["loss"]
+        if score < best_val:
+            best_val = score
             save_checkpoint(flow, RESULTS_DIR / "shape_flow_stage2_best.pt")
         save_checkpoint(flow, RESULTS_DIR / "shape_flow_stage2_last.pt")
 
