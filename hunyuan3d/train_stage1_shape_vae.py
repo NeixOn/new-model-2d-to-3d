@@ -33,6 +33,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -66,6 +67,17 @@ FLOW_HEADS = int(os.environ.get("FLOW_HEADS", "8"))
 DECODER_HIDDEN = int(os.environ.get("DECODER_HIDDEN", "384"))
 DECODER_LAYERS = int(os.environ.get("DECODER_LAYERS", "5"))
 FOURIER_BANDS = int(os.environ.get("FOURIER_BANDS", "8"))
+
+MAX_MODELS_PER_CLASS = int(os.environ.get("MAX_MODELS_PER_CLASS", "1200"))
+SHAPENET_CLASSES = [
+    item.strip()
+    for item in os.environ.get("SHAPENET_CLASSES", "03001627").split(",")
+    if item.strip()
+]
+POSSIBLE_SHAPENET_DIRS = [
+    Path("/kaggle/input/shapenet-3dr2n2"),
+    Path("/kaggle/input/datasets/sirish001/shapenet-3dr2n2"),
+]
 
 
 def seed_everything(seed: int) -> None:
@@ -130,6 +142,93 @@ def read_binvox(path: Path) -> np.ndarray:
         if voxels.size != expected:
             raise ValueError(f"Bad binvox RLE size in {path}: got {voxels.size}, expected {expected}")
         return voxels.reshape(dims)
+
+
+def find_shapenet_vox_archive() -> Path:
+    for dataset_dir in POSSIBLE_SHAPENET_DIRS:
+        archive = dataset_dir / "ShapeNetVox32.tgz"
+        if archive.exists():
+            return archive
+
+    input_root = Path("/kaggle/input")
+    if input_root.exists():
+        matches = list(input_root.rglob("ShapeNetVox32.tgz"))
+        if matches:
+            return matches[0]
+
+    raise FileNotFoundError(
+        "Cannot find ShapeNetVox32.tgz under /kaggle/input. "
+        "In Kaggle, add dataset https://www.kaggle.com/datasets/sirish001/shapenet-3dr2n2"
+    )
+
+
+def find_category_and_model(path: str, category_ids: set[str]) -> tuple[str | None, str | None]:
+    parts = Path(path).parts
+    for idx, part in enumerate(parts):
+        if part in category_ids and idx + 1 < len(parts):
+            return part, parts[idx + 1]
+    return None, None
+
+
+def safe_extract_member(tar: tarfile.TarFile, member: tarfile.TarInfo, dst: Path) -> None:
+    target = (dst / member.name).resolve()
+    dst_resolved = dst.resolve()
+    if not str(target).startswith(str(dst_resolved)):
+        raise RuntimeError(f"Unsafe archive member path: {member.name}")
+    tar.extract(member, dst)
+
+
+def prepare_shapenet_binvox_subset(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    done_file = root / f".prepared_binvox_m{MAX_MODELS_PER_CLASS}_{'_'.join(SHAPENET_CLASSES)}"
+    existing = list(root.rglob("*.binvox"))
+    if existing:
+        return
+    if done_file.exists():
+        return
+
+    archive = find_shapenet_vox_archive()
+    category_ids = set(SHAPENET_CLASSES)
+    chosen: dict[str, set[str]] = {cat_id: set() for cat_id in category_ids}
+
+    print(f"No .binvox files found in {root}")
+    print(f"Extracting ShapeNet voxel subset from: {archive}")
+    print(f"Classes: {', '.join(SHAPENET_CLASSES)}")
+    print(f"Max models per class: {MAX_MODELS_PER_CLASS}")
+
+    extracted = 0
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            if not member.isfile() or not member.name.endswith(".binvox"):
+                continue
+
+            cat_id, model_id = find_category_and_model(member.name, category_ids)
+            if cat_id is None or model_id is None:
+                continue
+            if len(chosen[cat_id]) >= MAX_MODELS_PER_CLASS:
+                continue
+
+            chosen[cat_id].add(model_id)
+            safe_extract_member(tar, member, root)
+            extracted += 1
+
+            if extracted % 250 == 0:
+                print(f"Extracted {extracted} binvox files...")
+
+            if all(len(models) >= MAX_MODELS_PER_CLASS for models in chosen.values()):
+                break
+
+    if extracted == 0:
+        raise RuntimeError(
+            "ShapeNetVox32.tgz was found, but no matching .binvox files were extracted. "
+            f"Check SHAPENET_CLASSES={SHAPENET_CLASSES}."
+        )
+
+    done_file.write_text("ok", encoding="utf-8")
+    print(
+        "Prepared ShapeNet binvox subset: "
+        + ", ".join(f"{cat_id}={len(models)}" for cat_id, models in chosen.items())
+    )
 
 
 def voxel_grid_coords(size: int) -> np.ndarray:
@@ -280,6 +379,13 @@ def discover_dataset(root: Path, field_type: str) -> Dataset:
     if binvox_paths:
         print(f"Using BINVOX occupancy dataset: {len(binvox_paths)} files")
         return BinvoxShapeDataset(binvox_paths)
+
+    if root.as_posix().startswith("/kaggle/working") or root.name.startswith("shapenet"):
+        prepare_shapenet_binvox_subset(root)
+        binvox_paths = sorted(root.rglob("*.binvox"))
+        if binvox_paths:
+            print(f"Using BINVOX occupancy dataset: {len(binvox_paths)} files")
+            return BinvoxShapeDataset(binvox_paths)
 
     raise FileNotFoundError(
         f"No points.npz/*.npz or *.binvox files found under {root}. "
