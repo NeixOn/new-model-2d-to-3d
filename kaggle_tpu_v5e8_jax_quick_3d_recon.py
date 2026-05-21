@@ -59,6 +59,8 @@ BCE_WEIGHT = float(os.environ.get("BCE_WEIGHT", "1.0"))
 DICE_WEIGHT = float(os.environ.get("DICE_WEIGHT", "1.0"))
 PATIENCE = int(os.environ.get("PATIENCE", "35"))
 MIN_DELTA = float(os.environ.get("MIN_DELTA", "1e-4"))
+USE_CACHE = int(os.environ.get("USE_CACHE", "1"))
+CACHE_DIR = WORK_DIR / "shapenet_r2n2_numpy_cache"
 
 
 def seed_everything(seed: int) -> None:
@@ -270,7 +272,56 @@ def load_sample(image_path: Path, voxel_path: Path):
     return image, vox
 
 
-def batch_loader(samples, batch_size: int, shuffle: bool):
+def cache_key(samples):
+    return f"m{MAX_MODELS_PER_CLASS}_v{VIEWS_PER_MODEL}_n{len(samples)}_i{IMAGE_SIZE}_x{VOXEL_SIZE}"
+
+
+def build_or_load_cache(samples):
+    """Cache decoded PNG/binvox data to uint8 memmaps.
+
+    This moves the expensive PIL resize and binvox RLE decoding out of every
+    epoch. CPU still feeds TPU batches, but it mostly does array indexing and a
+    cheap uint8->float32 conversion.
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = cache_key(samples)
+    images_path = CACHE_DIR / f"{key}_images_uint8.dat"
+    voxels_path = CACHE_DIR / f"{key}_voxels_uint8.dat"
+    index_path = CACHE_DIR / f"{key}_index.txt"
+
+    images_shape = (len(samples), IMAGE_SIZE, IMAGE_SIZE, 3)
+    voxels_shape = (len(samples), VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, 1)
+
+    if images_path.exists() and voxels_path.exists() and index_path.exists():
+        print(f"Using decoded numpy cache: {CACHE_DIR}")
+        images = np.memmap(images_path, dtype=np.uint8, mode="r", shape=images_shape)
+        voxels = np.memmap(voxels_path, dtype=np.uint8, mode="r", shape=voxels_shape)
+        return images, voxels
+
+    print(f"Building decoded numpy cache: {CACHE_DIR}")
+    print("This is a one-time cost; following epochs will be much lighter on CPU.")
+    images = np.memmap(images_path, dtype=np.uint8, mode="w+", shape=images_shape)
+    voxels = np.memmap(voxels_path, dtype=np.uint8, mode="w+", shape=voxels_shape)
+
+    with open(index_path, "w", encoding="utf-8") as f:
+        for idx, (image_path, voxel_path) in enumerate(samples):
+            image = Image.open(image_path).convert("RGB")
+            image = image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
+            images[idx] = np.asarray(image, dtype=np.uint8)
+            voxels[idx] = read_binvox(voxel_path).reshape(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE, 1).astype(np.uint8)
+            f.write(f"{image_path}\t{voxel_path}\n")
+            if (idx + 1) % 5000 == 0:
+                print(f"Cached {idx + 1}/{len(samples)} samples")
+
+    images.flush()
+    voxels.flush()
+    print(f"Cache ready: {images_path}, {voxels_path}")
+    images = np.memmap(images_path, dtype=np.uint8, mode="r", shape=images_shape)
+    voxels = np.memmap(voxels_path, dtype=np.uint8, mode="r", shape=voxels_shape)
+    return images, voxels
+
+
+def batch_loader(samples, batch_size: int, shuffle: bool, cache=None):
     idxs = np.arange(len(samples))
     if shuffle:
         np.random.shuffle(idxs)
@@ -280,12 +331,18 @@ def batch_loader(samples, batch_size: int, shuffle: bool):
 
     for start in range(0, usable, batch_size):
         batch_idxs = idxs[start : start + batch_size]
-        images, voxels = [], []
-        for idx in batch_idxs:
-            img, vox = load_sample(*samples[int(idx)])
-            images.append(img)
-            voxels.append(vox)
-        yield np.stack(images), np.stack(voxels)
+        if cache is not None:
+            image_cache, voxel_cache = cache
+            images = image_cache[batch_idxs].astype(np.float32) / 127.5 - 1.0
+            voxels = voxel_cache[batch_idxs].astype(np.float32)
+            yield images, voxels
+        else:
+            images, voxels = [], []
+            for idx in batch_idxs:
+                img, vox = load_sample(*samples[int(idx)])
+                images.append(img)
+                voxels.append(vox)
+            yield np.stack(images), np.stack(voxels)
 
 
 def shard_batch(batch, n_devices: int):
@@ -471,6 +528,8 @@ def main():
 
     samples = discover_samples(DATA_DIR)
     train_samples, val_samples = split_samples_by_model(samples, val_fraction=0.15, global_batch=global_batch)
+    train_cache = build_or_load_cache(train_samples) if USE_CACHE else None
+    val_cache = build_or_load_cache(val_samples) if USE_CACHE else None
 
     train_steps = len(train_samples) // global_batch
     val_steps = len(val_samples) // global_batch
@@ -480,7 +539,7 @@ def main():
     print(
         "Config: "
         f"epochs={EPOCHS}, views_per_model={VIEWS_PER_MODEL}, lr={LR}, min_lr={MIN_LR}, "
-        f"pos_weight={POS_WEIGHT}, threshold={THRESHOLD}, patience={PATIENCE}"
+        f"pos_weight={POS_WEIGHT}, threshold={THRESHOLD}, patience={PATIENCE}, use_cache={USE_CACHE}"
     )
 
     params = init_params(SEED)
@@ -497,7 +556,7 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         lr_value = epoch_lr(epoch)
         train_losses, train_ious = [], []
-        for batch in batch_loader(train_samples, global_batch, shuffle=True):
+        for batch in batch_loader(train_samples, global_batch, shuffle=True, cache=train_cache):
             images, voxels = shard_batch(batch, n_devices)
             lr_sharded = np.full((n_devices,), lr_value, dtype=np.float32)
             params_repl, opt_state_repl, loss, iou = p_train_step(
@@ -507,7 +566,7 @@ def main():
             train_ious.append(float(np.asarray(iou[0])))
 
         val_losses, val_ious = [], []
-        for batch in batch_loader(val_samples, global_batch, shuffle=False):
+        for batch in batch_loader(val_samples, global_batch, shuffle=False, cache=val_cache):
             images, voxels = shard_batch(batch, n_devices)
             loss, iou = p_eval_step(params_repl, images, voxels)
             val_losses.append(float(np.asarray(loss[0])))

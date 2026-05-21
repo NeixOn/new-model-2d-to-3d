@@ -135,8 +135,11 @@ LR = 2e-4
 %env MIN_LR=2e-5
 %env POS_WEIGHT=4.0
 %env PATIENCE=35
+%env USE_CACHE=1
 %run kaggle_tpu_v5e8_jax_quick_3d_recon.py
 ```
+
+`USE_CACHE=1` один раз декодирует `.png` и `.binvox` в numpy memmap cache. Первый запуск дольше готовится, но следующие эпохи значительно меньше нагружают CPU.
 
 И можно добавить классы:
 
