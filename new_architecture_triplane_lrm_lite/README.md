@@ -477,3 +477,124 @@ Input RGB image
 
 Это лучший следующий шаг после текущего baseline.
 
+## Готовые файлы
+
+В этой папке добавлены рабочие Kaggle/JAX-скрипты:
+
+```text
+kaggle_jax_triplane_occupancy_train.py
+kaggle_jax_triplane_infer_image_to_3d.py
+```
+
+Первый обучает новую архитектуру, второй применяет её к одному изображению и сохраняет `.obj`.
+
+## Быстрый запуск обучения
+
+Для первого сравнимого запуска:
+
+```python
+%cd /kaggle/working/new-model-2d-to-3d/new_architecture_triplane_lrm_lite
+
+%env EPOCHS=80
+%env MAX_MODELS_PER_CLASS=1200
+%env VIEWS_PER_MODEL=4
+%env PER_DEVICE_BATCH=4
+%env QUERY_POINTS=4096
+%env TRIPLANE_RES=32
+%env TRIPLANE_CHANNELS=16
+%env LR=2e-4
+%env MIN_LR=2e-5
+%env POS_WEIGHT=4.0
+%env PATIENCE=25
+%env MAX_VAL_BATCHES=50
+
+%run kaggle_jax_triplane_occupancy_train.py
+```
+
+Для более сильного запуска:
+
+```python
+%cd /kaggle/working/new-model-2d-to-3d/new_architecture_triplane_lrm_lite
+
+%env EPOCHS=120
+%env MAX_MODELS_PER_CLASS=6778
+%env VIEWS_PER_MODEL=8
+%env PER_DEVICE_BATCH=4
+%env QUERY_POINTS=4096
+%env TRIPLANE_RES=32
+%env TRIPLANE_CHANNELS=16
+%env LR=2e-4
+%env MIN_LR=2e-5
+%env POS_WEIGHT=4.0
+%env PATIENCE=30
+%env MAX_VAL_BATCHES=80
+
+%run kaggle_jax_triplane_occupancy_train.py
+```
+
+`MAX_VAL_BATCHES` ограничивает число validation batch для полного `32^3` IoU. Query-based модель честнее, но validation тяжелее, потому что она опрашивает implicit decoder по всем точкам сетки.
+
+## Inference
+
+После обучения:
+
+```python
+%cd /kaggle/working/new-model-2d-to-3d/new_architecture_triplane_lrm_lite
+%run kaggle_jax_triplane_infer_image_to_3d.py --image /path/to/chair.png
+```
+
+Результаты:
+
+```text
+/kaggle/working/triplane_lrm_lite_single_image/prediction.obj
+/kaggle/working/triplane_lrm_lite_single_image/prediction_preview.png
+/kaggle/working/triplane_lrm_lite_single_image/prediction_voxels.npy
+```
+
+Если объект получается слишком пустым:
+
+```python
+%run kaggle_jax_triplane_infer_image_to_3d.py --image /path/to/chair.png --threshold 0.25
+```
+
+## Как сравнивать со старой моделью
+
+Старая модель:
+
+```text
+RGB -> CNN -> Dense -> voxel 32^3
+```
+
+Новая модель:
+
+```text
+RGB -> CNN -> triplane features -> occupancy MLP(x,y,z) -> voxel/mesh
+```
+
+Сравнение:
+
+| Критерий | Dense voxel baseline | Triplane Occupancy |
+|---|---|---|
+| Выход | сразу `32^3` voxel | неявная функция occupancy |
+| Учитывает координаты | нет | да |
+| Можно опрашивать произвольные 3D-точки | нет | да |
+| Ближе к LRM/TripoSR | нет | да |
+| Train speed | быстрее | медленнее |
+| Validation speed | быстрее | медленнее |
+| Потенциал качества | ниже | выше |
+
+Ожидание:
+
+```text
+Dense voxel baseline на full chairs: около 0.41-0.46 IoU
+Triplane Occupancy должен стремиться выше, но обучение и validation будут тяжелее
+```
+
+Если новая модель не даст прирост сразу, это не означает, что идея хуже. Она чувствительнее к:
+
+- `QUERY_POINTS`;
+- количеству views;
+- threshold;
+- learning rate;
+- числу validation batches;
+- качеству train/val split.
